@@ -223,7 +223,6 @@ install(DIRECTORY include/
 
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
-  PATTERN "lifelong_launch.py" EXCLUDE
 )
 
 install(DIRECTORY config
