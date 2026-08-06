@@ -50,6 +50,12 @@ public:
   virtual void RemoveNode(kt_int32s id);
   // Removes constraints from the optimization problem
   virtual void RemoveConstraint(kt_int32s sourceId, kt_int32s targetId);
+  // Adds (or replaces) a unary absolute-pose prior on a node
+  virtual void AddPrior(
+    kt_int32s id, Eigen::Vector3d measured_pose,
+    Eigen::Matrix3d covariance);
+  // Removes a previously added unary prior from a node, if present
+  virtual void RemovePrior(kt_int32s id);
 
   // change a node's pose
   virtual void ModifyNode(const int & unique_id, Eigen::Vector3d pose);
@@ -71,6 +77,7 @@ private:
   // graph
   std::unordered_map<int, Eigen::Vector3d> * nodes_;
   std::unordered_map<size_t, ceres::ResidualBlockId> * blocks_;
+  std::unordered_map<int, ceres::ResidualBlockId> * prior_blocks_;
   std::unordered_map<int, Eigen::Vector3d>::iterator first_node_;
   boost::mutex nodes_mutex_;
 

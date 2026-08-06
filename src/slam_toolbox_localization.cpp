@@ -16,8 +16,12 @@
 
 /* Author: Steven Macenski */
 
+#include <array>
+#include <cmath>
 #include <memory>
 #include <string>
+#include <Eigen/Core>
+#include <Eigen/Dense>
 #include "slam_toolbox/slam_toolbox_localization.hpp"
 
 namespace slam_toolbox
@@ -34,6 +38,20 @@ LocalizationSlamToolbox::LocalizationSlamToolbox(rclcpp::NodeOptions options)
     "initialpose", 1,
     std::bind(&LocalizationSlamToolbox::localizePoseCallback,
     this, std::placeholders::_1));
+
+  // Source-agnostic absolute pose correction input. Any node that produces an
+  // estimate of base_link in the map frame with covariance (e.g. an AprilTag
+  // relocalizer) can publish here to correct SLAM's internal pose graph.
+  have_pose_correction_ = false;
+  pose_correction_timeout_ = 0.5;
+  pose_correction_timeout_ = this->declare_parameter("pose_correction_timeout",
+      pose_correction_timeout_);
+  pose_correction_sub_ =
+    this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+    "/pose_correction", 1,
+    std::bind(&LocalizationSlamToolbox::poseCorrectionCallback,
+    this, std::placeholders::_1));
+
   clear_localization_ = this->create_service<std_srvs::srv::Empty>(
     "slam_toolbox/clear_localization_buffer",
     std::bind(&LocalizationSlamToolbox::clearLocalizationBuffer, this,
@@ -195,6 +213,10 @@ LocalizedRangeScan * LocalizationSlamToolbox::addScan(
     delete range_scan;
     range_scan = nullptr;
   } else {
+    // fuse any pending absolute pose correction as a unary prior on this node
+    // and re-optimize so the corrected pose reflects it before we publish
+    applyPendingPoseCorrection(range_scan);
+
     // compute our new transform
     setTransformFromPoses(range_scan->GetCorrectedPose(), odom_pose,
       scan->header.stamp, update_reprocessing_transform);
@@ -203,6 +225,85 @@ LocalizedRangeScan * LocalizationSlamToolbox::addScan(
   }
 
   return range_scan;
+}
+
+/*****************************************************************************/
+void LocalizationSlamToolbox::poseCorrectionCallback(
+  const
+  geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+/*****************************************************************************/
+{
+  // Buffer the most recent correction; it will be applied as a unary prior on
+  // the next scan node that gets processed into the graph.
+  boost::mutex::scoped_lock lock(pose_correction_mutex_);
+  pending_pose_correction_ = *msg;
+  have_pose_correction_ = true;
+}
+
+/*****************************************************************************/
+void LocalizationSlamToolbox::applyPendingPoseCorrection(
+  LocalizedRangeScan * range_scan)
+/*****************************************************************************/
+{
+  if (!range_scan || !solver_) {
+    return;
+  }
+
+  geometry_msgs::msg::PoseWithCovarianceStamped correction;
+  {
+    boost::mutex::scoped_lock lock(pose_correction_mutex_);
+    if (!have_pose_correction_) {
+      return;
+    }
+    correction = pending_pose_correction_;
+    have_pose_correction_ = false;
+  }
+
+  // reject stale corrections relative to the scan being processed
+  const rclcpp::Time correction_stamp(correction.header.stamp);
+  const rclcpp::Time scan_stamp(scan_header.stamp);
+  if (pose_correction_timeout_ > 0.0 &&
+    correction_stamp.nanoseconds() > 0 && scan_stamp.nanoseconds() > 0)
+  {
+    const double dt = std::fabs((scan_stamp - correction_stamp).seconds());
+    if (dt > pose_correction_timeout_) {
+      RCLCPP_WARN(get_logger(),
+        "PoseCorrection: Discarding correction stale by %.3fs (timeout %.3fs).",
+        dt, pose_correction_timeout_);
+      return;
+    }
+  }
+
+  // absolute measured pose of base_link in the map frame
+  Eigen::Vector3d measured_pose(
+    correction.pose.pose.position.x,
+    correction.pose.pose.position.y,
+    tf2::getYaw(correction.pose.pose.orientation));
+
+  // extract the (x, y, yaw) sub-covariance from the 6x6 pose covariance
+  const std::array<double, 36> & c = correction.pose.covariance;
+  Eigen::Matrix3d covariance;
+  covariance << c[0], c[1], c[5],
+    c[6], c[7], c[11],
+    c[30], c[31], c[35];
+
+  // guard against a degenerate/uninitialized covariance
+  if (!covariance.allFinite() || std::fabs(covariance.determinant()) < 1e-12) {
+    RCLCPP_WARN(get_logger(),
+      "PoseCorrection: Ignoring correction with singular covariance.");
+    return;
+  }
+
+  const int node_id = range_scan->GetUniqueId();
+  solver_->AddPrior(node_id, measured_pose, covariance);
+
+  // re-optimize so the prior propagates into the graph and the scans'
+  // corrected poses (and thus map->odom) reflect the correction
+  smapper_->getMapper()->CorrectPoses();
+
+  RCLCPP_INFO(get_logger(),
+    "PoseCorrection: Applied absolute prior to node %i at (%.2f, %.2f, %.2f).",
+    node_id, measured_pose(0), measured_pose(1), measured_pose(2));
 }
 
 /*****************************************************************************/

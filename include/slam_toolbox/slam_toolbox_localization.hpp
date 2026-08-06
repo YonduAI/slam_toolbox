@@ -38,6 +38,9 @@ protected:
     sensor_msgs::msg::LaserScan::ConstSharedPtr scan) override;
   void localizePoseCallback(
     const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void poseCorrectionCallback(
+    const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void applyPendingPoseCorrection(LocalizedRangeScan * range_scan);
   bool clearLocalizationBuffer(
     const std::shared_ptr<rmw_request_id_t> request_header,
     const std::shared_ptr<std_srvs::srv::Empty::Request> req,
@@ -59,7 +62,16 @@ protected:
 
   std::shared_ptr<rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>>
   localization_pose_sub_;
+  std::shared_ptr<rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>>
+  pose_correction_sub_;
   std::shared_ptr<rclcpp::Service<std_srvs::srv::Empty> > clear_localization_;
+
+  // Pending absolute pose correction (map frame) to fuse as a unary prior on
+  // the next processed scan node. Source-agnostic (e.g. AprilTag relocalizer).
+  boost::mutex pose_correction_mutex_;
+  geometry_msgs::msg::PoseWithCovarianceStamped pending_pose_correction_;
+  bool have_pose_correction_;
+  double pose_correction_timeout_;
 };
 
 }  // namespace slam_toolbox

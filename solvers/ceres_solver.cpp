@@ -16,6 +16,7 @@ CeresSolver::CeresSolver()
 : nodes_(new std::unordered_map<int, Eigen::Vector3d>()),
   blocks_(new std::unordered_map<std::size_t,
     ceres::ResidualBlockId>()),
+  prior_blocks_(new std::unordered_map<int, ceres::ResidualBlockId>()),
   problem_(NULL), was_constant_set_(false)
 /*****************************************************************************/
 {
@@ -165,6 +166,9 @@ CeresSolver::~CeresSolver()
   if (blocks_ != NULL) {
     delete blocks_;
   }
+  if (prior_blocks_ != NULL) {
+    delete prior_blocks_;
+  }
   if (problem_ != NULL) {
     delete problem_;
   }
@@ -262,8 +266,13 @@ void CeresSolver::Reset()
     delete blocks_;
   }
 
+  if (prior_blocks_) {
+    delete prior_blocks_;
+  }
+
   nodes_ = new std::unordered_map<int, Eigen::Vector3d>();
   blocks_ = new std::unordered_map<std::size_t, ceres::ResidualBlockId>();
+  prior_blocks_ = new std::unordered_map<int, ceres::ResidualBlockId>();
   problem_ = new ceres::Problem(options_problem_);
   first_node_ = nodes_->end();
 
@@ -354,6 +363,14 @@ void CeresSolver::RemoveNode(kt_int32s id)
   boost::mutex::scoped_lock lock(nodes_mutex_);
   GraphIterator nodeit = nodes_->find(id);
   if (nodeit != nodes_->end()) {
+    // Removing the parameter blocks below cascades removal of any residual
+    // blocks that depend on them (including a unary prior on this node), so
+    // just drop our prior bookkeeping to avoid a dangling residual block id.
+    std::unordered_map<int, ceres::ResidualBlockId>::iterator priorit =
+      prior_blocks_->find(id);
+    if (priorit != prior_blocks_->end()) {
+      prior_blocks_->erase(priorit);
+    }
     if (problem_->HasParameterBlock(&nodeit->second(0)) &&
         problem_->HasParameterBlock(&nodeit->second(1)) &&
         problem_->HasParameterBlock(&nodeit->second(2)))
@@ -398,6 +415,58 @@ void CeresSolver::RemoveConstraint(kt_int32s sourceId, kt_int32s targetId)
     RCLCPP_ERROR(node_->get_logger(),
       "RemoveConstraint: Failed to find residual block for %i %i",
       (int)sourceId, (int)targetId);
+  }
+}
+
+/*****************************************************************************/
+void CeresSolver::AddPrior(
+  kt_int32s id, Eigen::Vector3d measured_pose,
+  Eigen::Matrix3d covariance)
+/*****************************************************************************/
+{
+  boost::mutex::scoped_lock lock(nodes_mutex_);
+
+  GraphIterator node_it = nodes_->find(id);
+  if (node_it == nodes_->end()) {
+    RCLCPP_WARN(node_->get_logger(),
+      "CeresSolver: Failed to add prior, could not find node %i.", (int)id);
+    return;
+  }
+
+  // If a prior already exists for this node, replace it.
+  std::unordered_map<int, ceres::ResidualBlockId>::iterator existing =
+    prior_blocks_->find(id);
+  if (existing != prior_blocks_->end()) {
+    problem_->RemoveResidualBlock(existing->second);
+    prior_blocks_->erase(existing);
+  }
+
+  // convert the measurement covariance into an information matrix
+  Eigen::Matrix3d information = covariance.inverse();
+  Eigen::Matrix3d sqrt_information = information.llt().matrixU();
+
+  ceres::CostFunction * cost_function = PoseGraph2dPriorErrorTerm::Create(
+    measured_pose(0), measured_pose(1), measured_pose(2), sqrt_information);
+  ceres::ResidualBlockId block = problem_->AddResidualBlock(
+    cost_function, loss_function_,
+    &node_it->second(0), &node_it->second(1), &node_it->second(2));
+  problem_->SetParameterization(&node_it->second(2),
+    angle_local_parameterization_);
+
+  prior_blocks_->insert(
+    std::pair<int, ceres::ResidualBlockId>(id, block));
+}
+
+/*****************************************************************************/
+void CeresSolver::RemovePrior(kt_int32s id)
+/*****************************************************************************/
+{
+  boost::mutex::scoped_lock lock(nodes_mutex_);
+  std::unordered_map<int, ceres::ResidualBlockId>::iterator it =
+    prior_blocks_->find(id);
+  if (it != prior_blocks_->end()) {
+    problem_->RemoveResidualBlock(it->second);
+    prior_blocks_->erase(it);
   }
 }
 

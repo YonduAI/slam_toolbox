@@ -1016,6 +1016,25 @@ public:
   }
 
   /**
+   * Adds (or replaces) a unary absolute-pose prior on a node. The prior pulls
+   * the node's optimized pose towards the supplied measured pose in the global
+   * frame, weighted by the inverse of the supplied covariance. Used to fuse
+   * external absolute pose corrections into the graph.
+   */
+  virtual void AddPrior(
+    kt_int32s /*id*/, Eigen::Vector3d /*measured_pose*/,
+    Eigen::Matrix3d /*covariance*/)
+  {
+  }
+
+  /**
+   * Removes a previously added unary prior from a node, if present.
+   */
+  virtual void RemovePrior(kt_int32s /*id*/)
+  {
+  }
+
+  /**
    * Resets the solver
    */
   virtual void Clear()

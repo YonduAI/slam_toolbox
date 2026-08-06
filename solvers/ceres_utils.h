@@ -120,4 +120,56 @@ private:
   const Eigen::Matrix3d sqrt_information_;
 };
 
+/*****************************************************************************/
+/*****************************************************************************/
+/*****************************************************************************/
+
+// Unary absolute-pose prior on a single node. Given an external measurement of
+// a node's global (map-frame) pose with covariance, this pulls the node's
+// optimized pose towards that measurement. Used to fuse absolute pose
+// corrections (e.g. from fiducials/AprilTags) into the pose graph.
+class PoseGraph2dPriorErrorTerm
+{
+public:
+  PoseGraph2dPriorErrorTerm(
+    double x, double y, double yaw_radians,
+    const Eigen::Matrix3d & sqrt_information)
+  : p_prior_(x, y), yaw_prior_radians_(yaw_radians), sqrt_information_(sqrt_information)
+  {
+  }
+
+  template<typename T>
+  bool operator()(
+    const T * const x, const T * const y, const T * const yaw,
+    T * residuals_ptr) const
+  {
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> residuals_map(residuals_ptr);
+    residuals_map(0) = *x - static_cast<T>(p_prior_.x());
+    residuals_map(1) = *y - static_cast<T>(p_prior_.y());
+    residuals_map(2) = NormalizeAngle(*yaw - static_cast<T>(yaw_prior_radians_));
+    // Scale the residuals by the square root information
+    // matrix to account for the measurement uncertainty.
+    residuals_map = sqrt_information_.template cast<T>() * residuals_map;
+    return true;
+  }
+
+  static ceres::CostFunction * Create(
+    double x, double y, double yaw_radians,
+    const Eigen::Matrix3d & sqrt_information)
+  {
+    return new ceres::AutoDiffCostFunction<PoseGraph2dPriorErrorTerm, 3, 1, 1, 1>(
+      new PoseGraph2dPriorErrorTerm(x, y, yaw_radians, sqrt_information));
+  }
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+private:
+  // The measured absolute position of the node in the global frame.
+  const Eigen::Vector2d p_prior_;
+  // The measured absolute orientation of the node in the global frame.
+  const double yaw_prior_radians_;
+  // The inverse square root of the measurement covariance matrix.
+  const Eigen::Matrix3d sqrt_information_;
+};
+
 #endif  // SOLVERS__CERES_UTILS_H_
