@@ -72,6 +72,7 @@ protected:
   geometry_msgs::msg::PoseWithCovarianceStamped pending_pose_correction_;
   bool have_pose_correction_;
   double pose_correction_timeout_;
+  bool pose_correction_verbose_;
 };
 
 }  // namespace slam_toolbox

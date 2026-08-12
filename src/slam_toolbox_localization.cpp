@@ -46,6 +46,9 @@ LocalizationSlamToolbox::LocalizationSlamToolbox(rclcpp::NodeOptions options)
   pose_correction_timeout_ = 0.5;
   pose_correction_timeout_ = this->declare_parameter("pose_correction_timeout",
       pose_correction_timeout_);
+  pose_correction_verbose_ = false;
+  pose_correction_verbose_ = this->declare_parameter("pose_correction_verbose",
+      pose_correction_verbose_);
   pose_correction_sub_ =
     this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "/pose_correction", 1,
@@ -236,8 +239,21 @@ void LocalizationSlamToolbox::poseCorrectionCallback(
   // Buffer the most recent correction; it will be applied as a unary prior on
   // the next scan node that gets processed into the graph.
   boost::mutex::scoped_lock lock(pose_correction_mutex_);
+  const bool overwrote_pending = have_pose_correction_;
   pending_pose_correction_ = *msg;
   have_pose_correction_ = true;
+
+  if (pose_correction_verbose_) {
+    const rclcpp::Time stamp(msg->header.stamp);
+    RCLCPP_INFO(get_logger(),
+      "PoseCorrection: Received correction on /pose_correction in frame '%s' "
+      "stamped %.3fs at (%.3f, %.3f, %.3f).%s",
+      msg->header.frame_id.c_str(), stamp.seconds(),
+      msg->pose.pose.position.x, msg->pose.pose.position.y,
+      tf2::getYaw(msg->pose.pose.orientation),
+      overwrote_pending ?
+      " Overwrote a previous unprocessed correction." : "");
+  }
 }
 
 /*****************************************************************************/
@@ -246,6 +262,11 @@ void LocalizationSlamToolbox::applyPendingPoseCorrection(
 /*****************************************************************************/
 {
   if (!range_scan || !solver_) {
+    if (pose_correction_verbose_) {
+      RCLCPP_INFO(get_logger(),
+        "PoseCorrection: Skipping correction; %s is not available.",
+        !range_scan ? "no scan node" : "no graph solver");
+    }
     return;
   }
 
@@ -253,10 +274,21 @@ void LocalizationSlamToolbox::applyPendingPoseCorrection(
   {
     boost::mutex::scoped_lock lock(pose_correction_mutex_);
     if (!have_pose_correction_) {
+      if (pose_correction_verbose_) {
+        RCLCPP_INFO(get_logger(),
+          "PoseCorrection: No pending correction to apply to node %i.",
+          range_scan->GetUniqueId());
+      }
       return;
     }
     correction = pending_pose_correction_;
     have_pose_correction_ = false;
+  }
+
+  if (pose_correction_verbose_) {
+    RCLCPP_INFO(get_logger(),
+      "PoseCorrection: Processing pending correction for scan node %i.",
+      range_scan->GetUniqueId());
   }
 
   // reject stale corrections relative to the scan being processed
@@ -271,6 +303,11 @@ void LocalizationSlamToolbox::applyPendingPoseCorrection(
         "PoseCorrection: Discarding correction stale by %.3fs (timeout %.3fs).",
         dt, pose_correction_timeout_);
       return;
+    }
+    if (pose_correction_verbose_) {
+      RCLCPP_INFO(get_logger(),
+        "PoseCorrection: Correction age %.3fs within timeout %.3fs; accepting.",
+        dt, pose_correction_timeout_);
     }
   }
 
@@ -294,12 +331,47 @@ void LocalizationSlamToolbox::applyPendingPoseCorrection(
     return;
   }
 
+  if (pose_correction_verbose_) {
+    RCLCPP_INFO(get_logger(),
+      "PoseCorrection: Measured pose (%.3f, %.3f, %.3f) with (x, y, yaw) "
+      "covariance diagonal (%.4e, %.4e, %.4e), determinant %.4e.",
+      measured_pose(0), measured_pose(1), measured_pose(2),
+      covariance(0, 0), covariance(1, 1), covariance(2, 2),
+      covariance.determinant());
+  }
+
   const int node_id = range_scan->GetUniqueId();
+
+  // snapshot SLAM's current estimate for this node so we can report how far the
+  // correction moves it once the prior is fused and the graph is re-optimized
+  const Pose2 pose_before = range_scan->GetCorrectedPose();
+
   solver_->AddPrior(node_id, measured_pose, covariance);
+
+  if (pose_correction_verbose_) {
+    RCLCPP_INFO(get_logger(),
+      "PoseCorrection: Added unary prior to node %i; re-optimizing pose graph.",
+      node_id);
+  }
 
   // re-optimize so the prior propagates into the graph and the scans'
   // corrected poses (and thus map->odom) reflect the correction
   smapper_->getMapper()->CorrectPoses();
+
+  if (pose_correction_verbose_) {
+    const Pose2 pose_after = range_scan->GetCorrectedPose();
+    const double dx = pose_after.GetX() - pose_before.GetX();
+    const double dy = pose_after.GetY() - pose_before.GetY();
+    double dyaw = pose_after.GetHeading() - pose_before.GetHeading();
+    dyaw = std::atan2(std::sin(dyaw), std::cos(dyaw));
+    RCLCPP_INFO(get_logger(),
+      "PoseCorrection: Node %i estimate shifted by (%.3f, %.3f, %.3f) "
+      "[translation %.3fm, rotation %.3frad]: (%.3f, %.3f, %.3f) -> "
+      "(%.3f, %.3f, %.3f).",
+      node_id, dx, dy, dyaw, std::hypot(dx, dy), std::fabs(dyaw),
+      pose_before.GetX(), pose_before.GetY(), pose_before.GetHeading(),
+      pose_after.GetX(), pose_after.GetY(), pose_after.GetHeading());
+  }
 
   RCLCPP_INFO(get_logger(),
     "PoseCorrection: Applied absolute prior to node %i at (%.2f, %.2f, %.2f).",
